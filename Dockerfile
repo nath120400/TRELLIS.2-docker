@@ -103,6 +103,9 @@ RUN mkdir -p /tmp/extensions \
 
 ENV PYTHONPATH=/opt/TRELLIS.2:${PYTHONPATH}
 
+ENV SERVER_HOST=0.0.0.0 \
+    SERVER_PORT=7861
+
 EXPOSE 7861/tcp
 
 CMD ["python", "main.py"]

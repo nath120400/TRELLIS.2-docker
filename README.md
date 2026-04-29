@@ -35,35 +35,159 @@ docker build -t trellis .
 ```
 
 3. Run the container
-Ensure you replace le token hf with your actual Hugging Face token.
+Ensure you replace token_hf with your actual Hugging Face token.
 
 ```bash
-docker run --gpus all -it -p 7861:7861 -e HF_TOKEN="le token hf"
+docker run --gpus all -it -p 7861:7861 -e SERVER_HOST=0.0.0.0 -e SERVER_PORT=7861 -e HF_TOKEN="token_hf" trellis
 
 ```
 
 ---
 
-### 🔄 API States (`state["status"]`)
+## TRELLIS.2 API Behavior
 
-The server uses a simple global state to track the background 3D generation process. It cycles through 4 main states:
+### `POST /queue` — Submit job
 
-* **`IDLE`**: Default state. The server is ready and waiting for a new image.
-* **`PROCESSING`**: A generation task is currently running. The server is locked and will reject new `POST` requests until the current job finishes.
-* **`DONE`**: Generation was successful. The `.glb` file is temporarily saved and ready to be downloaded.
-* **`ERROR`**: The generation crashed (e.g., pipeline failure, VRAM OOM, or export issue). The error message is stored to be fetched by the user.
+**Data**:
+
+```json
+{
+  "image": "base64 image",
+  "preprocess_image": true,
+  "seed": 42,
+  "resolution": "1024",
+  "ss_guidance_strength": 7.5,
+  "ss_guidance_rescale": 0.7,
+  "ss_sampling_steps": 12,
+  "ss_rescale_t": 5.0,
+  "shape_slat_guidance_strength": 7.5,
+  "shape_slat_guidance_rescale": 0.5,
+  "shape_slat_sampling_steps": 12,
+  "shape_slat_rescale_t": 3.0,
+  "tex_slat_guidance_strength": 1.0,
+  "tex_slat_guidance_rescale": 0.0,
+  "tex_slat_sampling_steps": 12,
+  "tex_slat_rescale_t": 3.0,
+  "decimation_target": 1000000,
+  "texture_size": 4096
+}
+```
+
+| Field | Type | Constraint | Default |
+|-------|------|------------|---------|
+| `image` | `string` | Base64 valide (PNG, JPEG, WEBP, BMP ou GIF) | **mandatory** |
+| `preprocess_image` | `boolean` | — | `true` |
+| `seed` | `integer` | — | `42` |
+| `resolution` | `string` | `"512"`, `"1024"`, `"1024_cascade"`, `"1536_cascade"` | `"1024"` |
+| `ss_guidance_strength` | `number` | `1.0` – `10.0` | `7.5` |
+| `ss_guidance_rescale` | `number` | `0.0` – `1.0` | `0.7` |
+| `ss_sampling_steps` | `integer` | `1` – `50` | `12` |
+| `ss_rescale_t` | `number` | `1.0` – `6.0` | `5.0` |
+| `shape_slat_guidance_strength` | `number` | `1.0` – `10.0` | `7.5` |
+| `shape_slat_guidance_rescale` | `number` | `0.0` – `1.0` | `0.5` |
+| `shape_slat_sampling_steps` | `integer` | `1` – `50` | `12` |
+| `shape_slat_rescale_t` | `number` | `1.0` – `6.0` | `3.0` |
+| `tex_slat_guidance_strength` | `number` | `1.0` – `10.0` | `1.0` |
+| `tex_slat_guidance_rescale` | `number` | `0.0` – `1.0` | `0.0` |
+| `tex_slat_sampling_steps` | `integer` | `1` – `50` | `12` |
+| `tex_slat_rescale_t` | `number` | `1.0` – `6.0` | `3.0` |
+| `decimation_target` | `integer` | `100000` – `1000000` | `1000000` |
+| `texture_size` | `integer` | `1024` – `4096` | `4096` |
 
 ---
 
-### ⚠️ HTTP Responses & Errors
+#### Here are **all SSE events** the server can emit after a `POST /queue` request:
 
-#### `POST /` (Start Generation)
-* 🟢 **`200 OK`**: Image received and generation started in the background.
-* 🟡 **`102 Processing`**: Cannot start a new job. Another generation is already in progress.
-* 🔴 **`400 Bad Request`**: Invalid JSON payload or the base64 image could not be decoded.
+#### 1. In queue (waiting)
 
-#### `GET /` (Check Status / Retrieve Result)
-* 🟢 **`200 OK`**: Returns the `.glb` file (`model/gltf-binary`). Automatically deletes the temp file and resets the server to `IDLE`.
-* 🟡 **`102 Processing`**: The server is still computing the 3D model. Keep polling.
-* 🔴 **`404 Not Found`**: The server is `IDLE` (no job has been started) or the file went missing after completion.
-* 🔴 **`500 Internal Server Error`**: The generation failed. Returns the exact crash message (`Crash: ...`) and resets the server to `IDLE`.
+```json
+{
+  "status": "in_queue",
+  "pos": 0
+}
+```
+
+- **`status`**: always `"in_queue"`
+- **`pos`**: position in the queue (0 = first to be processed)
+
+---
+
+#### 2. Processing
+
+```json
+{
+  "status": "processing"
+}
+```
+
+- **`status`**: always `"processing"`
+- No other fields.
+
+---
+
+#### 3. Success – Model ready
+
+```json
+{
+  "status": "ready",
+  "uid": "a1b2c3d4e5f6...",
+  "timeout": 60.0
+}
+```
+
+- **`uid`**: unique job identifier, to be used with `GET /uid/{uid}` to download the `.glb` file.
+- **`timeout`**: time in seconds before the file is deleted (value of `READY_TIMEOUT`, default `60.0`).
+
+---
+
+#### 4. Failure
+
+```json
+{
+  "status": "fail",
+  "error": "PIPELINE FAILED: ...",
+  "timeout": 30.0
+}
+```
+
+- **`error`**: detailed error message.
+- **`timeout`**: time in seconds before cleanup (value of `FAIL_TIMEOUT`, default `30.0`).
+
+---
+
+### Typical event flow
+
+```
+data: {"status": "in_queue", "pos": 2}
+
+data: {"status": "in_queue", "pos": 1}
+
+data: {"status": "in_queue", "pos": 0}
+
+data: {"status": "processing"}
+
+data: {"status": "processing"}
+
+data: {"status": "ready", "uid": "abc123...", "timeout": 60.0}
+```
+
+Or in case of failure:
+
+```
+data: {"status": "in_queue", "pos": 0}
+
+data: {"status": "processing"}
+
+data: {"status": "fail", "error": "PIPELINE FAILED: CUDA out of memory", "timeout": 60.0}
+```
+
+---
+
+### `GET /uid/{uid}`
+
+Download the generated `.glb` file using the `uid` received from the SSE events.
+
+| Code | Meaning | Body |
+|------|---------|------|
+| `200` | File found and returned | Binary `.glb` data (`Content-Type: model/gltf-binary`) |
+| `404` | UID not found or expired / job not ready / job failed | Plain text `"Not found"` |
